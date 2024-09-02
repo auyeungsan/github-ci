@@ -1,0 +1,9 @@
+FROM public.ecr.aws/docker/library/alpine:3.18
+RUN apk add -U --no-cache ca-certificates
+
+WORKDIR /app
+
+COPY ./main .
+COPY docs/gc-api.yaml docs/gc-api.yaml
+COPY docs/gc-api.html docs/gc-api.html
+ENTRYPOINT ["/app/main"]

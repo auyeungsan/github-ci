@@ -1,0 +1,142 @@
+name: Development Backend Golang CI Build 
+
+on:
+  workflow_call:
+    inputs:
+      # pass in environment through manual trigger, if not passed in, default to 'dev'
+      ENV:
+        required: true
+        type: string
+        default: "dev"
+      SERVICE_NAME:
+        required: true
+        type: string
+        default: "."
+      AWS_REGION:
+        required: false
+        type: string
+        default: "ap-southeast-1"
+      BUILD_VERSION:
+        required: true
+        type: string
+        default: "."
+      # working-directory is added to accommodate monorepo.  For multi repo, defaults to '.', current directory
+      working-directory:
+        required: false
+        type: string
+        default: "."
+      go-version:
+        required: false
+        type: string
+        default: "1.21"
+      DOCKERFILE:
+        required: false
+        type: string
+        default: "Dockerfile.be-go"
+      AWS_ACCOUNT:
+        required: true
+        type: string
+        default: "."
+    outputs:
+      status:
+        value: ${{ jobs.build-and-push.outputs.status }}
+
+env:
+    GITHUB_ORG: "test"
+    common-dockerfile-repo: "infra-ghaction-workflows"
+    
+jobs:
+   build-and-push:
+      name: Build the docker image and push to ECR
+      runs-on: [arc-custom-runner-test]      
+      outputs:
+        status: ${{ steps.jobstatus.outputs.STATUS }}
+
+      steps:
+      - name: Checkout service repo
+        uses: actions/checkout@master
+        with:
+            path: ${{ inputs.SERVICE_NAME }}
+            fetch-depth: 0            
+            token: ${{ secrets.ORG_GITHUB_TOKEN }}
+
+      - name: Setup go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go-version }}
+          cache-dependency-path: "**/go.sum"
+
+      - name: Setup AWS_ID
+        run: |
+            if [ "${{ inputs.AWS_ACCOUNT }}" == "Kumao" ]; then
+              echo "ASST_ROLE=arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/dev-ghaction-ecr-upload-role" >> $GITHUB_ENV
+            elif [ "${{ inputs.AWS_ACCOUNT }}" == "test" ]; then
+              echo "ASST_ROLE=arn:aws:iam::${{ secrets.test_AWS_ACCOUNT_ID }}:role/dev-ghaction-ecr-upload-role" >> $GITHUB_ENV
+            else
+              echo "AWS ACCOUNT NOT FOUND"
+              exit 1
+            fi
+
+      - name: Setup Secrets and Vars. according to the env.
+        run: |
+            echo "IMAGE_TAG=${{ inputs.BUILD_VERSION}} " >> $GITHUB_ENV
+
+      - name: Checkout common Dockfile repo
+        uses: actions/checkout@master
+        with:
+            repository: ${{ env.GITHUB_ORG }}/${{ env.common-dockerfile-repo }}
+            path: ${{ env.common-dockerfile-repo }}
+            token: ${{ secrets.ORG_GITHUB_TOKEN }}
+            ref: main
+
+      - name: Replace Dockerfile
+        run: |
+            mv ${{ env.common-dockerfile-repo }}/Dockerfiles/${{ inputs.DOCKERFILE }} ./${{ inputs.SERVICE_NAME }}/Dockerfile
+
+      # Add steps here like linting, testing, minification, etc.
+        
+      # https://github.com/aws-actions/configure-aws-credentials
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ASST_ROLE }}
+          aws-region: ${{ inputs.AWS_REGION }}
+          role-duration-seconds: 900
+
+      # https://github.com/aws-actions/amazon-ecr-login
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          mask-password: 'true'          
+
+      - name: Configure Git for private modules
+        run: |
+          git config --global url."https://${{ secrets.ORG_GITHUB_TOKEN }}:x-oauth-basic@github.com/".insteadOf "https://github.com/"
+
+      - name: Go Build application
+        run: |
+          cd ${{ inputs.SERVICE_NAME }}
+          export GO111MODULE=on
+          GOSUMDB=off go mod tidy
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOPROXY=direct GOSUMDB=off go build -v main.go          
+
+      - name: Set IMGAE_REPO variable
+        env: 
+            ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+              echo "IMAGE_REPO=${{ env.ECR_REGISTRY }}/${{ inputs.ENV }}-${{ inputs.SERVICE_NAME }}" >> $GITHUB_ENV
+
+      - name: Build DockerImage and push
+        run: |
+              cd ${{ inputs.SERVICE_NAME }}
+              docker build -t ${{ env.IMAGE_REPO }}:${{ env.IMAGE_TAG }} \
+              -t ${{ env.IMAGE_REPO }}:latest \
+              -f Dockerfile .
+              docker push ${{ env.IMAGE_REPO }}:${{ env.IMAGE_TAG }}
+              docker push ${{ env.IMAGE_REPO }}:latest
+
+      - name: Output Job status
+        if: always()
+        id: jobstatus
+        run: echo "STATUS=${{ job.status }}" >> $GITHUB_OUTPUT

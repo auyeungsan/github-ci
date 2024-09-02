@@ -1,0 +1,29 @@
+name: Development
+on:
+  push:
+    branches:       
+    - dev
+jobs:
+  build-and-push:
+    permissions:
+      id-token: write
+      contents: read
+    uses: test/infra-ghaction-workflows/.github/workflows/be-go-dev-build.yaml@v2
+    with:
+      ENV: dev
+      SERVICE_NAME: ${{ github.event.repository.name }}
+      AWS_REGION: ap-southeast-1
+      BUILD_VERSION: v${{github.run_number}}-build
+      go-version: "1.21"
+      DOCKERFILE: "Dockerfile.be-gameclient-go"
+      AWS_ACCOUNT: "test"
+    secrets: inherit
+
+  post-notify:
+    if: ${{ always() }}
+    needs: [build-and-push]
+    uses: test/infra-ghaction-workflows/.github/workflows/post-slack-notify.yaml@v2
+    with:
+      CHANNEL: alert-smartwin-github-deployment
+      STATUS: ${{ needs.build-and-push.outputs.status }}
+    secrets: inherit
